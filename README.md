@@ -1,4 +1,6 @@
-# [Rust Skiplist](http://www.jpellis.me/projects/rust-skiplist)
+# [Rust Skiplist]
+
+This repository is forked from [Rust Skiplist](http://www.jpellis.me/projects/rust-skiplist). The feature that deterministic SkipList is newly added here.
 
 [![crates.io](https://img.shields.io/crates/v/skiplist.svg)](https://crates.io/crates/skiplist)
 [![crates.io](https://img.shields.io/crates/d/skiplist.svg)](https://crates.io/crates/skiplist)

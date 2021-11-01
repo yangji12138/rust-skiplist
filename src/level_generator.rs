@@ -25,6 +25,8 @@ pub trait LevelGenerator {
     ///
     /// This must never return a level that is `>= self.total()`.
     fn random(&mut self) -> usize;
+
+    fn determine(&mut self, x: i32) -> usize;
 }
 
 /// A level generator which will produce geometrically distributed numbers.
@@ -66,12 +68,22 @@ impl GeometricalLevelGenerator {
 
 impl LevelGenerator for GeometricalLevelGenerator {
     fn random(&mut self) -> usize {
-        let mut h = 0;
-        let mut x = self.p;
-        let f = 1.0 - self.rng.gen::<f64>();
-        while x > f && h + 1 < self.total {
+              let mut h = 0;
+                let mut x = self.p;
+                let f = 1.0 - self.rng.gen::<f64>();
+                while x > f && h + 1 < self.total {
+                    h += 1;
+                    x *= self.p
+                }
+        
+
+        h
+    }
+
+    fn determine(&mut self, x: i32) -> usize {
+        let mut h : usize = 0;
+        while x % (2_i32.pow(h as u32)) == 0 && h < self.total {
             h += 1;
-            x *= self.p
         }
         h
     }

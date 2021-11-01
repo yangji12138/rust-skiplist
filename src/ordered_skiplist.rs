@@ -293,6 +293,26 @@ impl<T> OrderedSkipList<T> {
         self.len += 1;
     }
 
+    /// Insert the element into the skiplist.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use skiplist::OrderedSkipList;
+    ///
+    /// let mut skiplist = OrderedSkipList::new();
+    ///
+    /// skiplist.insert_with_order(0, 0);
+    /// skiplist.insert_with_order(5, 5);
+    /// assert_eq!(skiplist.len(), 2);
+    /// assert!(!skiplist.is_empty());
+    /// ```
+    pub fn insert_with_order(&mut self, value: T, order: i32) {
+        let new_node = Box::new(SkipNode::new(value, self.level_generator.determine(order)));
+        let inserter = OrdInserter::new(self.compare.as_ref(), new_node);
+        let _ = inserter.act(self.head.as_mut());
+        self.len += 1;
+    }
     /// Provides a reference to the front element, or `None` if the skiplist is
     /// empty.
     ///
