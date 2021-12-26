@@ -19,6 +19,7 @@ codecov = { repository = "JP-Ellis/rust-skiplist", branch = "master", service = 
 
 [dependencies]
 rand = {version = "0.8", features = ["small_rng"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 
 [dev-dependencies]
 criterion = "0.3"

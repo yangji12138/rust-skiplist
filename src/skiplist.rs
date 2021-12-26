@@ -24,7 +24,7 @@ pub struct SkipList<T> {
     // Storage, this is not sorted
     head: Box<SkipNode<T>>,
     len: usize,
-    level_generator: GeometricalLevelGenerator,
+    pub level_generator: GeometricalLevelGenerator,
 }
 
 // ///////////////////////////////////////////////
@@ -154,6 +154,18 @@ impl<T> SkipList<T> {
         let new_node = Box::new(SkipNode::new(value, self.level_generator.random()));
         self.head
             .insert_at(new_node, index)
+            .unwrap_or_else(|_| panic!("No insertion position is found!"));
+    }
+
+
+    pub fn insert_with_order(&mut self, value: T, index: i32) {
+        if index as usize > self.len() {
+            panic!("Index out of bounds.");
+        }
+        self.len += 1;
+        let new_node = Box::new(SkipNode::new(value, self.level_generator.determine(index)));
+        self.head
+            .insert_at(new_node, index as usize)
             .unwrap_or_else(|_| panic!("No insertion position is found!"));
     }
 
@@ -650,7 +662,7 @@ impl<T> SkipList<T> {
     }
 
     /// Gets a pointer to the node with the given index.
-    fn get_index(&self, index: usize) -> Option<&SkipNode<T>> {
+    pub fn get_index(&self, index: usize) -> Option<&SkipNode<T>> {
         if self.len() <= index {
             None
         } else {

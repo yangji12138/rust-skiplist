@@ -34,6 +34,7 @@ pub use crate::skipnode::{IntoIter, Iter, IterMut};
 /// **Failure to satisfy these properties can result in unexpected behavior at
 /// best, and at worst will cause a segfault, null deref, or some other bad
 /// behavior.**
+/// 
 pub struct OrderedSkipList<T> {
     // Storage, this is not sorted
     head: Box<SkipNode<T>>,

@@ -10,6 +10,7 @@
 //! suffice, but if need be custom level generators can be implemented.
 
 use rand::prelude::*;
+use serde::{Serialize, Deserialize};
 
 // ////////////////////////////////////////////////////////////////////////////
 // Level Generator
@@ -29,16 +30,27 @@ pub trait LevelGenerator {
     fn determine(&mut self, x: i32) -> usize;
 }
 
+#[derive(Clone, Debug)]
+pub struct MyRng(SmallRng);
+
 /// A level generator which will produce geometrically distributed numbers.
 ///
 /// The probability of generating level `n` is `p` times the probability of
 /// generating level `n-1`, with the probability truncated at the maximum number
 /// of levels allowed.
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GeometricalLevelGenerator {
-    total: usize,
+    pub total: usize,
     p: f64,
     // unit_range: distributions::Range<f64>,
-    rng: SmallRng, // Fast generator
+    #[serde(skip)]
+    rng: MyRng, // Fast generator
+}
+
+impl Default for MyRng {
+    fn default() -> Self {
+        MyRng(SmallRng::from_entropy())
+    }
 }
 
 impl GeometricalLevelGenerator {
@@ -61,7 +73,7 @@ impl GeometricalLevelGenerator {
             total,
             p,
             // unit_range: distributions::Range::new(0.0f64, 1.0),
-            rng: SmallRng::from_rng(thread_rng()).unwrap(),
+            rng: MyRng(SmallRng::from_rng(thread_rng()).unwrap()),
         }
     }
 }
@@ -70,7 +82,7 @@ impl LevelGenerator for GeometricalLevelGenerator {
     fn random(&mut self) -> usize {
               let mut h = 0;
                 let mut x = self.p;
-                let f = 1.0 - self.rng.gen::<f64>();
+                let f = 1.0 - self.rng.0.gen::<f64>();
                 while x > f && h + 1 < self.total {
                     h += 1;
                     x *= self.p
@@ -82,7 +94,7 @@ impl LevelGenerator for GeometricalLevelGenerator {
 
     fn determine(&mut self, x: i32) -> usize {
         let mut h : usize = 0;
-        while x % (2_i32.pow(h as u32)) == 0 && h < self.total {
+        while x % (2_i32.pow((h + 1) as u32)) == 0 && h + 1 < self.total {
             h += 1;
         }
         h
