@@ -10,6 +10,10 @@ use crate::{
 };
 
 pub use crate::skipnode::{IntoIter, Iter, IterMut};
+use chain_common::digest::Digestible;
+pub use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
+pub use primitive_types::*;
+use crate::digest::{Proof, SubProof};
 
 // ////////////////////////////////////////////////////////////////////////////
 // SkipList
@@ -20,18 +24,47 @@ pub use crate::skipnode::{IntoIter, Iter, IterMut};
 ///
 /// Unlike a standard linked list, the skiplist can skip ahead when trying to
 /// find a particular index.
-pub struct SkipList<T> {
+#[derive(Clone)]
+pub struct SkipList<T:Digestible + PartialEq + Clone + Default> {
     // Storage, this is not sorted
-    head: Box<SkipNode<T>>,
-    len: usize,
+    pub head: Box<SkipNode<T>>,
+    pub len: usize,
     pub level_generator: GeometricalLevelGenerator,
 }
+/*
+impl <T:Digestible + PartialEq + Clone> Copy for SkipList<T> {
+}*/
+
+impl <T:Digestible + PartialEq + Clone + Default> Digestible for SkipList<T> {
+    fn to_digest(&self) -> H256 {
+        let mut hasher = Blake2bParams::new();
+        hasher.hash_length(32);
+        hasher.to_state().update((*self.head).to_digest().as_bytes());
+        hasher.to_state().update(&self.len.to_le_bytes());
+        hasher.to_state().update(&self.level_generator.to_digest().as_bytes());
+        H256::from_slice(hasher.to_state().finalize().as_bytes())    
+    }
+}
+
+impl <T:Digestible + PartialEq + Clone + Default> SkipList<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (*self.head == *other.head) && (self.len == other.len) && (self.level_generator == other.level_generator)
+    }
+}
+/*
+impl <T:Digestible + PartialEq + Clone> Default for SkipList<T> {
+    fn default() -> Self {
+        Self::new()
+     }
+}
+*/
+
 
 // ///////////////////////////////////////////////
 // Inherent methods
 // ///////////////////////////////////////////////
 
-impl<T> SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> SkipList<T> {
     /// Create a new skiplist with the default number of 16 levels.
     ///
     /// # Examples
@@ -317,6 +350,29 @@ impl<T> SkipList<T> {
         self.get_index(index).and_then(|node| node.item.as_ref())
     }
 
+    #[inline]
+    pub fn get_with_proof(&self, index: usize) -> (Option<&T>, Proof<T>) {
+        let (value, nodes) = self.get_index_with_proof(index);
+        let mut values: Vec<Option<T>> = Vec::new();
+        let temp = value.and_then(|node| node.item.clone());
+        values.push(temp);
+        let mut nodehash: Vec<H256> = Vec::new();
+        for elem in nodes.iter() {
+            nodehash.push(elem.to_digest());
+        }
+        let subproof = SubProof::new(nodes.clone(), values, nodehash);
+        let proof = Proof {
+                       root: self.to_digest(),
+                       subproof: subproof,};
+        (value.and_then(|node| node.item.as_ref()), proof)
+    }
+
+    #[inline]
+    pub fn get_with_subproof(&self, index: usize) -> (Option<&T>, Vec<SkipNode<T>>) {
+        let (value, nodes) = self.get_index_with_proof(index);
+        (value.and_then(|node| node.item.as_ref()), nodes)
+    }
+
     /// Provides a mutable reference to the element at the given index, or
     /// `None` if the skiplist is empty or the index is out of bounds.
     ///
@@ -556,7 +612,7 @@ impl<T> SkipList<T> {
     }
 }
 
-impl<T> SkipList<T>
+impl<T:Digestible + PartialEq + Clone + Default> SkipList<T>
 where
     T: PartialEq,
 {
@@ -602,7 +658,7 @@ where
 // Internal methods
 // ///////////////////////////////////////////////
 
-impl<T> SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> SkipList<T> {
     /// Checks the integrity of the skiplist.
     #[allow(dead_code)]
     fn check(&self) {
@@ -670,6 +726,16 @@ impl<T> SkipList<T> {
         }
     }
 
+    /// Gets a pointer to the node with the given index.
+    pub fn get_index_with_proof(&self, index: usize) -> (Option<&SkipNode<T>>, Vec<SkipNode<T>>) {
+        if self.len() <= index {
+            let proof : Vec<SkipNode<T>> = Vec::new();
+            (None, proof)
+        } else {
+            self.head.advance_with_proof(index + 1)
+        }
+    }
+
     fn get_index_mut(&mut self, index: usize) -> Option<&mut SkipNode<T>> {
         if self.len() <= index {
             None
@@ -679,7 +745,7 @@ impl<T> SkipList<T> {
     }
 }
 
-impl<T> SkipList<T>
+impl<T:Digestible + PartialEq + Clone + Default> SkipList<T>
 where
     T: fmt::Debug,
 {
@@ -745,20 +811,21 @@ where
 // Trait implementation
 // ///////////////////////////////////////////////
 
-unsafe impl<T: Send> Send for SkipList<T> {}
-unsafe impl<T: Sync> Sync for SkipList<T> {}
+unsafe impl<T: Send + Digestible + PartialEq + Clone + Default> Send for SkipList<T> {}
+unsafe impl<T: Sync + Digestible + PartialEq + Clone + Default> Sync for SkipList<T> {}
 
-impl<T> default::Default for SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> default::Default for SkipList<T> {
     fn default() -> SkipList<T> {
         SkipList::new()
     }
 }
 
+
 /// This implementation of PartialEq only checks that the *values* are equal; it
 /// does not check for equivalence of other features (such as the ordering
 /// function and the node levels). Furthermore, this uses `T`'s implementation
 /// of PartialEq and *does not* use the owning skiplist's comparison function.
-impl<A, B> cmp::PartialEq<SkipList<B>> for SkipList<A>
+impl<A:Digestible + PartialEq + Clone + Default, B:Digestible + PartialEq + Clone + Default> cmp::PartialEq<SkipList<B>> for SkipList<A>
 where
     A: cmp::PartialEq<B>,
 {
@@ -773,9 +840,9 @@ where
     }
 }
 
-impl<T> cmp::Eq for SkipList<T> where T: cmp::Eq {}
+impl<T:Digestible + PartialEq + Clone + Default> cmp::Eq for SkipList<T> where T: cmp::Eq {}
 
-impl<A, B> cmp::PartialOrd<SkipList<B>> for SkipList<A>
+impl<A:Digestible + PartialEq + Clone + Default, B:Digestible + PartialEq + Clone + Default> cmp::PartialOrd<SkipList<B>> for SkipList<A>
 where
     A: cmp::PartialOrd<B>,
 {
@@ -785,7 +852,7 @@ where
     }
 }
 
-impl<T> Ord for SkipList<T>
+impl<T:Digestible + PartialEq + Clone + Default> Ord for SkipList<T>
 where
     T: cmp::Ord,
 {
@@ -795,7 +862,7 @@ where
     }
 }
 
-impl<T> Extend<T> for SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> Extend<T> for SkipList<T> {
     #[inline]
     fn extend<I: iter::IntoIterator<Item = T>>(&mut self, iterable: I) {
         let iterator = iterable.into_iter();
@@ -805,7 +872,7 @@ impl<T> Extend<T> for SkipList<T> {
     }
 }
 
-impl<T> ops::Index<usize> for SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> ops::Index<usize> for SkipList<T> {
     type Output = T;
 
     fn index(&self, index: usize) -> &T {
@@ -813,13 +880,13 @@ impl<T> ops::Index<usize> for SkipList<T> {
     }
 }
 
-impl<T> ops::IndexMut<usize> for SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> ops::IndexMut<usize> for SkipList<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).expect("Index out of range")
     }
 }
 
-impl<T> fmt::Debug for SkipList<T>
+impl<T:Digestible + PartialEq + Clone + Default> fmt::Debug for SkipList<T>
 where
     T: fmt::Debug,
 {
@@ -836,7 +903,7 @@ where
     }
 }
 
-impl<T> fmt::Display for SkipList<T>
+impl<T:Digestible + PartialEq + Clone + Default> fmt::Display for SkipList<T>
 where
     T: fmt::Display,
 {
@@ -853,7 +920,7 @@ where
     }
 }
 
-impl<T> iter::IntoIterator for SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> iter::IntoIterator for SkipList<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -861,7 +928,7 @@ impl<T> iter::IntoIterator for SkipList<T> {
         self.into_iter()
     }
 }
-impl<'a, T> iter::IntoIterator for &'a SkipList<T> {
+impl<'a, T:Digestible + PartialEq + Clone + Default> iter::IntoIterator for &'a SkipList<T> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;
 
@@ -869,7 +936,7 @@ impl<'a, T> iter::IntoIterator for &'a SkipList<T> {
         self.iter()
     }
 }
-impl<'a, T> iter::IntoIterator for &'a mut SkipList<T> {
+impl<'a, T:Digestible + PartialEq + Clone + Default> iter::IntoIterator for &'a mut SkipList<T> {
     type Item = &'a mut T;
     type IntoIter = IterMut<'a, T>;
 
@@ -878,7 +945,7 @@ impl<'a, T> iter::IntoIterator for &'a mut SkipList<T> {
     }
 }
 
-impl<T> iter::FromIterator<T> for SkipList<T> {
+impl<T:Digestible + PartialEq + Clone + Default> iter::FromIterator<T> for SkipList<T> {
     #[inline]
     fn from_iter<I>(iter: I) -> SkipList<T>
     where
@@ -890,7 +957,7 @@ impl<T> iter::FromIterator<T> for SkipList<T> {
     }
 }
 
-impl<T: Hash> Hash for SkipList<T> {
+impl<T: Hash + Digestible + PartialEq + Clone + Default> Hash for SkipList<T> {
     #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         for elt in self {
@@ -899,497 +966,3 @@ impl<T: Hash> Hash for SkipList<T> {
     }
 }
 
-// ////////////////////////////////////////////////////////////////////////////
-// Tests
-// ////////////////////////////////////////////////////////////////////////////
-
-#[cfg(test)]
-mod tests {
-    use super::SkipList;
-    use std::ops::Bound::{self, Excluded, Included, Unbounded};
-
-    #[test]
-    fn push_front() {
-        let mut sl = SkipList::new();
-        for i in (1..100).rev() {
-            sl.push_front(i);
-        }
-
-        assert!(sl.into_iter().eq(1..100));
-    }
-
-    #[test]
-    fn push_back() {
-        let mut sl = SkipList::new();
-        for i in 1..100 {
-            sl.push_back(i);
-        }
-        assert!(sl.into_iter().eq(1..100));
-    }
-
-    #[test]
-    fn insert_rand() {
-        use rand::distributions::Uniform;
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let mut sl: SkipList<usize> = SkipList::new();
-        let mut vec: Vec<usize> = Vec::new();
-        for i in 0..100 {
-            let idx = rng.sample(Uniform::new_inclusive(0, i));
-            sl.insert(i, idx);
-            vec.insert(idx, i);
-        }
-        assert_eq!(sl.into_iter().collect::<Vec<_>>(), vec);
-    }
-
-    #[test]
-    fn insert_repeat() {
-        let mut sl = SkipList::new();
-        let repeat = 10;
-        for val in 0..10 {
-            for i in 0..repeat {
-                sl.insert(val * 10 + i, val * 10);
-                sl.check();
-            }
-        }
-    }
-
-    #[test]
-    fn remove_rand() {
-        use rand::distributions::Uniform;
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let mut v: Vec<i32> = (0..1000).collect();
-        let mut sl: SkipList<i32> = (0..1000).collect();
-        for i in (0..1000).rev() {
-            let idx = rng.sample(Uniform::new_inclusive(0, i));
-            assert_eq!(sl.remove(idx), v.remove(idx));
-        }
-    }
-
-    #[test]
-    fn append_test() {}
-
-    #[test]
-    fn basic_small() {
-        let mut sl: SkipList<i64> = SkipList::new();
-        sl.check();
-        sl.insert(1, 0);
-        sl.check();
-        assert_eq!(sl.remove(0), 1);
-        sl.check();
-        sl.insert(1, 0);
-        sl.check();
-        sl.insert(2, 1);
-        sl.check();
-        assert_eq!(sl.remove(0), 1);
-        sl.check();
-        assert_eq!(sl.remove(0), 2);
-        sl.check();
-    }
-
-    #[test]
-    fn basic_large() {
-        let size = 500;
-        let mut sl = SkipList::with_capacity(500);
-        assert!(sl.is_empty());
-
-        for i in 0..size {
-            sl.insert(i, i);
-            assert_eq!(sl.len(), i + 1);
-        }
-        sl.check();
-
-        for i in 0..size {
-            assert_eq!(sl.remove(0), i);
-            assert_eq!(sl.len(), size - i - 1);
-        }
-        sl.check();
-
-        for i in 0..size {
-            sl = (0..size).collect();
-            assert_eq!(sl.remove(i), i);
-        }
-    }
-
-    #[test]
-    fn clear() {
-        let mut sl: SkipList<i64> = (0..100).collect();
-        assert_eq!(sl.len(), 100);
-        sl.clear();
-        sl.check();
-        assert!(sl.is_empty());
-    }
-
-    #[test]
-    fn last() {
-        let mut sl = SkipList::new();
-        assert_eq!(sl.iter().rev().next(), None);
-        for i in 0..100 {
-            sl.push_back(i);
-            assert_eq!(sl.iter().rev().next(), Some(&i));
-        }
-    }
-
-    #[test]
-    fn iter() {
-        let size = 10000;
-
-        let mut sl: SkipList<_> = (0..size).collect();
-
-        fn test<T>(size: usize, mut iter: T)
-        where
-            T: Iterator<Item = usize>,
-        {
-            for i in 0..size {
-                assert_eq!(iter.size_hint(), (size - i, Some(size - i)));
-                assert_eq!(iter.next().unwrap(), i);
-            }
-            assert_eq!(iter.size_hint(), (0, Some(0)));
-            assert!(iter.next().is_none());
-        }
-        test(size, sl.iter().copied());
-        #[allow(clippy::map_clone)]
-        test(size, sl.iter_mut().map(|&mut i| i));
-        test(size, sl.into_iter());
-    }
-
-    #[test]
-    fn iter_rev() {
-        let size = 10000;
-
-        let mut sl: SkipList<_> = (0..size).collect();
-
-        fn test<T>(size: usize, mut iter: T)
-        where
-            T: Iterator<Item = usize>,
-        {
-            for i in 0..size {
-                assert_eq!(iter.size_hint(), (size - i, Some(size - i)));
-                assert_eq!(iter.next().unwrap(), size - i - 1);
-            }
-            assert_eq!(iter.size_hint(), (0, Some(0)));
-            assert!(iter.next().is_none());
-        }
-        test(size, sl.iter().rev().copied());
-        #[allow(clippy::map_clone)]
-        test(size, sl.iter_mut().rev().map(|&mut i| i));
-        test(size, sl.into_iter().rev());
-    }
-
-    #[test]
-    fn iter_mixed() {
-        let size = 10000;
-
-        let mut sl: SkipList<_> = (0..size).collect();
-
-        fn test<T>(size: usize, mut iter: T)
-        where
-            T: Iterator<Item = usize> + DoubleEndedIterator,
-        {
-            for i in 0..size / 4 {
-                assert_eq!(iter.size_hint(), (size - i * 2, Some(size - i * 2)));
-                assert_eq!(iter.next().unwrap(), i);
-                assert_eq!(iter.next_back().unwrap(), size - i - 1);
-            }
-            for i in size / 4..size * 3 / 4 {
-                assert_eq!(iter.size_hint(), (size * 3 / 4 - i, Some(size * 3 / 4 - i)));
-                assert_eq!(iter.next().unwrap(), i);
-            }
-            assert_eq!(iter.size_hint(), (0, Some(0)));
-            assert!(iter.next().is_none());
-        }
-        test(size, sl.iter().copied());
-        #[allow(clippy::map_clone)]
-        test(size, sl.iter_mut().map(|&mut i| i));
-        test(size, sl.into_iter());
-    }
-
-    #[test]
-    fn range_small() {
-        let size = 5;
-
-        let sl: SkipList<_> = (0..size).collect();
-
-        let mut j = 0;
-        for (&v, i) in sl.range(Included(2), Unbounded).zip(2..size) {
-            assert_eq!(v, i);
-            j += 1;
-        }
-        assert_eq!(j, size - 2);
-    }
-
-    #[test]
-    fn range_1000() {
-        let size = 1000;
-        let sl: SkipList<_> = (0..size).collect();
-
-        fn test(sl: &SkipList<usize>, min: Bound<usize>, max: Bound<usize>) {
-            let mut values = sl.range(min, max);
-            #[allow(clippy::range_plus_one)]
-            let mut expects = match (min, max) {
-                (Excluded(a), Excluded(b)) => (a + 1)..b,
-                (Included(a), Excluded(b)) => a..b,
-                (Unbounded, Excluded(b)) => 0..b,
-                (Excluded(a), Included(b)) => (a + 1)..(b + 1),
-                (Included(a), Included(b)) => a..(b + 1),
-                (Unbounded, Included(b)) => 0..(b + 1),
-                (Excluded(a), Unbounded) => (a + 1)..1000,
-                (Included(a), Unbounded) => a..1000,
-                (Unbounded, Unbounded) => 0..1000,
-            };
-
-            assert_eq!(values.size_hint(), expects.size_hint());
-
-            for (&v, e) in values.by_ref().zip(expects.by_ref()) {
-                assert_eq!(v, e);
-            }
-            assert!(values.next().is_none());
-            assert!(expects.next().is_none());
-        }
-
-        test(&sl, Excluded(200), Excluded(800));
-        test(&sl, Included(200), Excluded(800));
-        test(&sl, Unbounded, Excluded(800));
-        test(&sl, Excluded(200), Included(800));
-        test(&sl, Included(200), Included(800));
-        test(&sl, Unbounded, Included(800));
-        test(&sl, Excluded(200), Unbounded);
-        test(&sl, Included(200), Unbounded);
-        test(&sl, Unbounded, Unbounded);
-    }
-
-    #[test]
-    fn range_mut_1000() {
-        let size = 1000;
-        let mut sl: SkipList<_> = (0..size).collect();
-
-        fn test(sl: &mut SkipList<usize>, min: Bound<usize>, max: Bound<usize>) {
-            let mut values = sl.range(min, max);
-            #[allow(clippy::range_plus_one)]
-            let mut expects = match (min, max) {
-                (Excluded(a), Excluded(b)) => (a + 1)..b,
-                (Included(a), Excluded(b)) => a..b,
-                (Unbounded, Excluded(b)) => 0..b,
-                (Excluded(a), Included(b)) => (a + 1)..(b + 1),
-                (Included(a), Included(b)) => a..(b + 1),
-                (Unbounded, Included(b)) => 0..(b + 1),
-                (Excluded(a), Unbounded) => (a + 1)..1000,
-                (Included(a), Unbounded) => a..1000,
-                (Unbounded, Unbounded) => 0..1000,
-            };
-            assert_eq!(values.size_hint(), expects.size_hint());
-
-            for (&v, e) in values.by_ref().zip(expects.by_ref()) {
-                assert_eq!(v, e);
-            }
-            assert!(values.next().is_none());
-            assert!(expects.next().is_none());
-        }
-
-        test(&mut sl, Excluded(200), Excluded(800));
-        test(&mut sl, Included(200), Excluded(800));
-        test(&mut sl, Unbounded, Excluded(800));
-        test(&mut sl, Excluded(200), Included(800));
-        test(&mut sl, Included(200), Included(800));
-        test(&mut sl, Unbounded, Included(800));
-        test(&mut sl, Excluded(200), Unbounded);
-        test(&mut sl, Included(200), Unbounded);
-        test(&mut sl, Unbounded, Unbounded);
-    }
-
-    #[test]
-    fn range() {
-        let size = 200;
-        let sl: SkipList<_> = (0..size).collect();
-
-        for i in 0..size {
-            for j in 0..size {
-                let mut values = sl.range(Included(i), Included(j));
-                let mut expects = i..=j;
-
-                for (&v, e) in values.by_ref().zip(expects.by_ref()) {
-                    assert_eq!(v, e);
-                }
-                assert!(values.next().is_none());
-                assert!(expects.next().is_none());
-            }
-        }
-
-        for i in 0..size {
-            for j in 0..size {
-                let mut values = sl.range(Included(i), Included(j)).rev();
-                let mut expects = (i..=j).rev();
-
-                assert_eq!(values.size_hint(), expects.size_hint());
-
-                for (&v, e) in values.by_ref().zip(expects.by_ref()) {
-                    assert_eq!(v, e);
-                }
-                assert!(values.next().is_none());
-                assert!(expects.next().is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn index_pop() {
-        let size = 1000;
-        let mut sl: SkipList<_> = (0..size).collect();
-        assert_eq!(sl.front(), Some(&0));
-        assert_eq!(sl.front_mut(), Some(&mut 0));
-        assert_eq!(sl.back(), Some(&(size - 1)));
-        assert_eq!(sl.back_mut(), Some(&mut (size - 1)));
-        for mut i in 0..size {
-            assert_eq!(sl[i], i);
-            assert_eq!(sl.get(i), Some(&i));
-            assert_eq!(sl.get_mut(i), Some(&mut i))
-        }
-
-        let mut sl: SkipList<_> = (0..size).collect();
-        for i in 0..size {
-            assert_eq!(sl.pop_front(), Some(i));
-            assert_eq!(sl.len(), size - i - 1);
-        }
-        assert!(sl.pop_front().is_none());
-        assert!(sl.front().is_none());
-        assert!(sl.is_empty());
-
-        let mut sl: SkipList<_> = (0..size).collect();
-        for i in 0..size {
-            assert_eq!(sl.pop_back(), Some(size - i - 1));
-            assert_eq!(sl.len(), size - i - 1);
-        }
-        assert!(sl.pop_back().is_none());
-        assert!(sl.back().is_none());
-        assert!(sl.is_empty());
-    }
-
-    #[test]
-    fn contains() {
-        let (min, max) = (25, 75);
-        let sl: SkipList<_> = (min..max).collect();
-
-        for i in 0..100 {
-            if i < min || i >= max {
-                assert!(!sl.contains(&i));
-            } else {
-                assert!(sl.contains(&i));
-            }
-        }
-    }
-
-    #[test]
-    fn inplace_mut() {
-        let size = 1000;
-        let mut sl: SkipList<_> = (0..size).collect();
-
-        for i in 0..size {
-            let v = sl.get_mut(i).unwrap();
-            *v *= 2;
-        }
-
-        for i in 0..size {
-            assert_eq!(sl.get(i), Some(&(2 * i)));
-        }
-    }
-
-    #[test]
-    fn dedup() {
-        let size = 1000;
-        let repeats = 10;
-
-        let mut sl: SkipList<usize> = SkipList::new();
-        for i in 0..size {
-            for _ in 0..repeats {
-                sl.insert(i, i * repeats);
-            }
-        }
-        {
-            let mut iter = sl.iter();
-            for i in 0..size {
-                for _ in 0..repeats {
-                    assert_eq!(iter.next(), Some(&i));
-                }
-            }
-        }
-        sl.dedup();
-        sl.check();
-        let mut iter = sl.iter();
-        for i in 0..size {
-            assert_eq!(iter.next(), Some(&i));
-        }
-    }
-
-    #[test]
-    fn retain() {
-        let repeats = 10;
-        let size = 100;
-
-        let mut sl: SkipList<usize> = SkipList::new();
-        for i in 0..size {
-            for _ in 0..repeats {
-                sl.insert(i, i * repeats);
-                sl.check();
-            }
-        }
-        {
-            let mut iter = sl.iter();
-            for i in 0..size {
-                for _ in 0..repeats {
-                    assert_eq!(iter.next(), Some(&i));
-                }
-            }
-        }
-        sl.retain(|&x| x % 5 == 0);
-        sl.debug_structure();
-        sl.check();
-        assert_eq!(sl.len(), repeats * size / 5);
-
-        {
-            let mut iter = sl.iter();
-            for i in 0..size / 5 {
-                for _ in 0..repeats {
-                    assert_eq!(iter.next(), Some(&(i * 5)));
-                }
-            }
-        }
-        sl.retain(|&_| false);
-        sl.check();
-        assert!(sl.is_empty());
-    }
-
-    #[test]
-    fn debug_display() {
-        let sl: SkipList<_> = (0..10).collect();
-        sl.debug_structure();
-        println!("{:?}", sl);
-        println!("{}", sl);
-    }
-
-    #[test]
-    #[allow(clippy::eq_op, clippy::many_single_char_names)]
-    fn equality() {
-        let a: SkipList<i64> = (0..100).collect();
-        let b: SkipList<i64> = (0..100).collect();
-        let c: SkipList<i64> = (0..10).collect();
-        let d: SkipList<i64> = (100..200).collect();
-        let e: SkipList<i64> = (0..100).chain(0..1).collect();
-
-        assert_eq!(a, a);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        assert_ne!(a, d);
-        assert_ne!(a, e);
-        assert_eq!(b, b);
-        assert_ne!(b, c);
-        assert_ne!(b, d);
-        assert_ne!(b, e);
-        assert_eq!(c, c);
-        assert_ne!(c, d);
-        assert_ne!(c, e);
-        assert_eq!(d, d);
-        assert_ne!(d, e);
-        assert_eq!(e, e);
-    }
-}

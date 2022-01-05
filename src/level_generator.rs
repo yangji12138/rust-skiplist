@@ -11,7 +11,9 @@
 
 use rand::prelude::*;
 use serde::{Serialize, Deserialize};
-
+use chain_common::digest::Digestible;
+pub use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
+pub use primitive_types::*;
 // ////////////////////////////////////////////////////////////////////////////
 // Level Generator
 // ////////////////////////////////////////////////////////////////////////////
@@ -38,13 +40,28 @@ pub struct MyRng(SmallRng);
 /// The probability of generating level `n` is `p` times the probability of
 /// generating level `n-1`, with the probability truncated at the maximum number
 /// of levels allowed.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GeometricalLevelGenerator {
     pub total: usize,
-    p: f64,
+    pub p: f64,
     // unit_range: distributions::Range<f64>,
     #[serde(skip)]
     rng: MyRng, // Fast generator
+}
+
+impl Digestible for GeometricalLevelGenerator {
+    fn to_digest(&self) -> H256 {
+        let mut hasher = Blake2bParams::new();
+        hasher.hash_length(32);
+        hasher.to_state().update(&self.total.to_le_bytes());
+        hasher.to_state().update(&self.p.to_le_bytes());
+        H256::from_slice(hasher.to_state().finalize().as_bytes())    }
+}
+
+impl PartialEq for GeometricalLevelGenerator {
+    fn eq(&self, other: &Self) -> bool {
+        (self.total == other.total) && (self.p == other.p)
+    }
 }
 
 impl Default for MyRng {
@@ -52,6 +69,8 @@ impl Default for MyRng {
         MyRng(SmallRng::from_entropy())
     }
 }
+
+
 
 impl GeometricalLevelGenerator {
     /// Create a new GeometricalLevelGenerator with `total` number of levels,

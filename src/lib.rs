@@ -48,11 +48,14 @@
 
 extern crate rand;
 pub mod level_generator;
-pub mod ordered_skiplist;
+//pub mod ordered_skiplist;
 pub mod skiplist;
-pub mod skipmap;
-mod skipnode;
+//pub mod skipmap;
+pub mod digest;
+pub mod skipnode;
 
-pub use crate::ordered_skiplist::OrderedSkipList;
+//pub use crate::ordered_skiplist::OrderedSkipList;
 pub use crate::skiplist::SkipList;
-pub use crate::skipmap::SkipMap;
+//pub use crate::skipmap::SkipMap;
+pub use digest::*;
+

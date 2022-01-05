@@ -20,6 +20,10 @@ codecov = { repository = "JP-Ellis/rust-skiplist", branch = "master", service = 
 [dependencies]
 rand = {version = "0.8", features = ["small_rng"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+blake2b_simd = { version = "0.5", default-features = false }
+primitive-types = { version = "0.9", default-features = false, features = ["serde_no_std", "byteorder"] }
+chain-merkle-trie = { path = "../chain/chain-merkle-trie"}
+chain-common = {path = "../chain/chain-common"}
 
 [dev-dependencies]
 criterion = "0.3"

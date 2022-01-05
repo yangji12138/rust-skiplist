@@ -3,6 +3,10 @@ use std::{
     fmt, iter,
     ptr::{self, NonNull},
 };
+use chain_common::digest::Digestible;
+pub use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
+pub use primitive_types::*;
+use serde::{Deserialize, Serialize};
 
 // ////////////////////////////////////////////////////////////////////////////
 // SkipNode
@@ -35,27 +39,52 @@ type Link<T> = Option<NonNull<SkipNode<T>>>;
 ///
 /// Lastly, each node contains a link to the immediately previous node in case
 /// one needs to parse the list backwards.
-#[derive(Clone, Debug)]
-pub struct SkipNode<V> {
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkipNode<V: Digestible + Clone> {
     // item should never be None, unless the node is a head.
     pub item: Option<V>,
     // how high the node reaches.
     pub level: usize,
     // The immediately previous element.
+    #[serde(skip)]
     pub prev: Link<V>,
     // Vector of links to the next node at the respective level.  This vector
     // *must* be of length `self.level + 1`.  links[0] stores a pointer to the
     // next node, which will have to be dropped.
+    #[serde(skip)]
     pub links: Vec<Link<V>>,
     // The corresponding length of each link
     pub links_len: Vec<usize>,
+}
+
+impl <V: Digestible + Clone> Digestible for SkipNode<V> {
+    fn to_digest(&self) -> H256 {
+        let mut hasher = Blake2bParams::new();
+        hasher.hash_length(32);
+        if let Some(x) = &self.item {
+            hasher.to_state().update(x.to_digest().as_bytes());
+        }
+        hasher.to_state().update(&self.level.to_le_bytes());
+        /*
+        if let Some(x) = &self.prev {
+            let ref_x = unsafe { x.as_ref() };
+            hasher.to_state().update(ref_x.to_digest().as_bytes());
+        }       
+        for value in self.links.iter() {
+            if let Some(x) = value {
+                let ref_x = unsafe { x.as_ref() };
+                hasher.to_state().update(ref_x.to_digest().as_bytes());
+            }
+        }*/
+        H256::from_slice(hasher.to_state().finalize().as_bytes())    
+    }
 }
 
 // ///////////////////////////////////////////////
 // Inherent methods
 // ///////////////////////////////////////////////
 
-impl<V> SkipNode<V> {
+impl <V: Digestible + Clone> SkipNode<V> {
     /// Create a new head node.
     pub fn head(total_levels: usize) -> Self {
         SkipNode {
@@ -232,6 +261,26 @@ impl<V> SkipNode<V> {
 
     /// Move for max_distance units.
     /// Returns None if it's not possible.
+    pub fn advance_with_proof(&self, max_distance: usize) -> (Option<&Self>, Vec<Self>) {
+        let level = self.level;
+        let mut node = self;
+        let mut distance_left = max_distance;
+        let mut proof : Vec<Self> = Vec::new();
+        for level in (0..=level).rev() {
+            let (new_node, steps, mut subproof) = node.advance_at_level_with_proof(level, distance_left);
+            proof.append(&mut subproof);
+            distance_left -= steps;
+            node = new_node;
+        }
+        if distance_left == 0 {
+            (Some(node), proof)
+        } else {
+            (None, proof)
+        }
+    }
+
+    /// Move for max_distance units.
+    /// Returns None if it's not possible.
     pub fn advance(&self, max_distance: usize) -> Option<&Self> {
         let level = self.level;
         let mut node = self;
@@ -284,6 +333,22 @@ impl<V> SkipNode<V> {
     /// If it's impossible, then move as far as possible.
     ///
     /// Returns a reference to the new node and the distance travelled.
+    pub fn advance_at_level_with_proof(&self, level: usize, mut max_distance: usize) -> (&Self, usize, Vec<Self>) {
+        self.advance_while_at_level_with_proof(level, move |current_node, _| {
+            let travelled = current_node.links_len[level];
+            if travelled <= max_distance {
+                max_distance -= travelled;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Try to move for the given distance, only using links at the specified level.
+    /// If it's impossible, then move as far as possible.
+    ///
+    /// Returns a reference to the new node and the distance travelled.
     pub fn advance_at_level(&self, level: usize, mut max_distance: usize) -> (&Self, usize) {
         self.advance_while_at_level(level, move |current_node, _| {
             let travelled = current_node.links_len[level];
@@ -314,6 +379,30 @@ impl<V> SkipNode<V> {
                 false
             }
         })
+    }
+
+    /// Keep moving at the specified level as long as pred is true.
+    /// pred takes reference to current node and next node.
+    pub fn advance_while_at_level_with_proof(
+        &self,
+        level: usize,
+        mut pred: impl FnMut(&Self, &Self) -> bool,
+    ) -> (&Self, usize, Vec<Self>) {
+        let mut current = self;
+        let mut travelled = 0;
+        let mut proof : Vec<Self> = Vec::new();
+        loop {
+            match current.next_if_at_level(level, &mut pred) {
+                Ok((node, steps)) => {
+                    current = node;
+                    travelled += steps;
+                    proof.push((*node).clone());
+                }
+                Err(node) => {
+                    return (node, travelled, proof);
+                } 
+            }
+        }
     }
 
     /// Keep moving at the specified level as long as pred is true.
@@ -485,8 +574,8 @@ impl<V> SkipNode<V> {
         }
     }
 }
-
-impl<V> Drop for SkipNode<V> {
+/*
+impl<V: Digestible + Clone> Drop for SkipNode<V> {
     fn drop(&mut self) {
         // SAFETY: all nodes are going to be dropped; its okay that its links (except those at
         // level 0) become dangling.
@@ -498,12 +587,13 @@ impl<V> Drop for SkipNode<V> {
         }
     }
 }
+*/
 
 // ///////////////////////////////////////////////
 // Trait implementation
 // ///////////////////////////////////////////////
 
-impl<V> fmt::Display for SkipNode<V>
+impl<V: Digestible + Clone> fmt::Display for SkipNode<V>
 where
     V: fmt::Display,
 {
@@ -532,7 +622,7 @@ where
 /// and call `act()` on the given list.
 ///
 /// For examples, see one of the types that implements this trait, such as [IndexInserter] or [IndexRemover].
-pub trait SkipListAction<'a, T>: Sized {
+pub trait SkipListAction<'a, T: Digestible + Clone>: Sized{
     /// Return type when this action succeeds.
     type Ok;
     /// Return type when this action fails.
@@ -616,7 +706,7 @@ pub trait SkipListAction<'a, T>: Sized {
 }
 
 // helpers for ListActions.
-impl<T> SkipNode<T> {
+impl<T: Digestible + Clone> SkipNode<T> {
     /// Insert the new node immediatly after this node.
     ///
     /// SAFETY: This doesn't fix links at level 1 or higher.
@@ -649,7 +739,7 @@ impl DistanceSeeker {
     /// whose distance from `node` is no greater than `self.0`.
     ///
     /// Return target node and distance travelled if succeeds.
-    fn seek<'a, V>(
+    fn seek<'a, V: Digestible + Clone>(
         &mut self,
         node: &'a mut SkipNode<V>,
         level: usize,
@@ -667,12 +757,12 @@ impl DistanceSeeker {
 /// Insert a new node at the given index.
 ///
 /// See [SkipNode::insert_at] for examples on how to use.
-struct IndexInserter<V> {
+struct IndexInserter<V: Digestible + Clone> {
     index_seek: DistanceSeeker,
     new_node: Box<SkipNode<V>>,
 }
 
-impl<V> IndexInserter<V> {
+impl<V: Digestible + Clone> IndexInserter<V> {
     fn new(distance: usize, new_node: Box<SkipNode<V>>) -> Self {
         IndexInserter {
             index_seek: DistanceSeeker(distance),
@@ -681,7 +771,7 @@ impl<V> IndexInserter<V> {
     }
 }
 
-impl<'a, V: 'a> SkipListAction<'a, V> for IndexInserter<V> {
+impl<'a, V: 'a + Digestible + Clone> SkipListAction<'a, V> for IndexInserter<V> {
     type Ok = &'a mut SkipNode<V>;
 
     type Err = Box<SkipNode<V>>;
@@ -731,7 +821,7 @@ impl IndexRemover {
     }
 }
 
-impl<'a, V> SkipListAction<'a, V> for IndexRemover {
+impl<'a, V: Digestible + Clone> SkipListAction<'a, V> for IndexRemover {
     type Ok = Box<SkipNode<V>>;
 
     type Err = ();
@@ -771,7 +861,7 @@ impl<'a, V> SkipListAction<'a, V> for IndexRemover {
 ///
 /// Put the new_node after level_head if applicable, and adjust link_len.
 /// `distance_to_parent` is the distance from `level_head` to the parent of `new_node`.
-pub fn insertion_fixup<T>(
+pub fn insertion_fixup<T: Digestible + Clone>(
     level: usize,
     level_head: &mut SkipNode<T>,
     distance_to_parent: usize,
@@ -793,7 +883,7 @@ pub fn insertion_fixup<T>(
 }
 
 /// Fix links at the given level after removal.
-pub fn removal_fixup<T>(
+pub fn removal_fixup<T: Digestible + Clone>(
     level: usize,
     level_head: &mut SkipNode<T>,
     removed_node: &mut Box<SkipNode<T>>,
@@ -813,7 +903,7 @@ pub fn removal_fixup<T>(
 }
 
 // helpers for ordered types.
-impl<V> SkipNode<V> {
+impl<V: Digestible + Clone> SkipNode<V> {
     /// Find the last node such that f(node.item) returns true.
     /// Return a reference to the node and distance travelled.
     fn find_ordering_impl<F>(&self, f: F) -> (&Self, usize)
@@ -933,12 +1023,12 @@ impl<T> AsPtrMut<T> for Option<&mut T> {
 // so the members are named first and last instaed of head/end to avoid confusion.
 
 /// An iterator for [SkipList](super::SkipList) and [OrderedSkipList](super::OrderedSkipList).
-pub struct Iter<'a, T> {
+pub struct Iter<'a, T: Digestible + Clone> {
     pub(crate) first: Option<&'a SkipNode<T>>,
     pub(crate) last: Option<&'a SkipNode<T>>,
     pub(crate) size: usize,
 }
-impl<'a, T> Iter<'a, T> {
+impl<'a, T: Digestible + Clone> Iter<'a, T> {
     /// SAFETY: There must be `len` nodes after head.
     pub(crate) unsafe fn from_head(head: &'a SkipNode<T>, len: usize) -> Self {
         if len == 0 {
@@ -959,7 +1049,7 @@ impl<'a, T> Iter<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for Iter<'a, T> {
+impl<'a, T: Digestible + Clone> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -979,7 +1069,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
+impl<'a, T: Digestible + Clone> DoubleEndedIterator for Iter<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let last_node = self.last?;
 
@@ -998,13 +1088,13 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 }
 
 /// A mutable iterator for [SkipList](super::SkipList) and [OrderedSkipList](super::OrderedSkipList).
-pub struct IterMut<'a, T> {
+pub struct IterMut<'a, T: Digestible + Clone> {
     pub(crate) first: Option<&'a mut SkipNode<T>>,
     pub(crate) last: Option<NonNull<SkipNode<T>>>,
     pub(crate) size: usize,
 }
 
-impl<'a, T> IterMut<'a, T> {
+impl<'a, T: Digestible + Clone> IterMut<'a, T> {
     /// SAFETY: There must be `len` nodes after head.
     pub(crate) unsafe fn from_head(head: &'a mut SkipNode<T>, len: usize) -> Self {
         if len == 0 {
@@ -1025,7 +1115,7 @@ impl<'a, T> IterMut<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for IterMut<'a, T> {
+impl<'a, T: Digestible + Clone> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1053,7 +1143,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
+impl<'a, T: Digestible + Clone> DoubleEndedIterator for IterMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.last?;
         debug_assert!(self.last.is_some());
@@ -1085,13 +1175,13 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 }
 
 /// Consuming iterator for [SkipList](super::SkipList), [OrderedSkipList](super::OrderedSkipList) and [SkipMap](super::SkipMap).
-pub struct IntoIter<T> {
+pub struct IntoIter<T: Digestible + Clone> {
     pub(crate) first: Option<Box<SkipNode<T>>>,
     pub(crate) last: Option<NonNull<SkipNode<T>>>,
     pub(crate) size: usize,
 }
 
-impl<T> IntoIter<T> {
+impl<T: Digestible + Clone> IntoIter<T> {
     /// SAFETY: There must be `len` nodes after head.
     pub(crate) unsafe fn from_head(head: &mut SkipNode<T>, len: usize) -> Self {
         if len == 0 {
@@ -1112,7 +1202,7 @@ impl<T> IntoIter<T> {
     }
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T: Digestible + Clone> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -1131,7 +1221,7 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> DoubleEndedIterator for IntoIter<T> {
+impl<T: Digestible + Clone> DoubleEndedIterator for IntoIter<T> {
     fn next_back(&mut self) -> Option<T> {
         #[allow(clippy::question_mark)]
         if self.first.is_none() {
@@ -1167,225 +1257,5 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 
         self.size -= 1;
         popped_node.into_inner()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    /// Minimum levels required for a list of size n.
-    fn levels_required(n: usize) -> usize {
-        if n == 0 {
-            1
-        } else {
-            let num_bits = std::mem::size_of::<usize>() * 8;
-            num_bits - n.leading_zeros() as usize
-        }
-    }
-
-    /// Test test_covariance for SkipNode.
-    /// Those functions should compile if our data structures is covariant.
-    /// Read Rustonomicon for details.
-    #[test]
-    fn test_covariance() {
-        #[allow(dead_code)]
-        fn shorten_lifetime<'min, 'max: 'min>(v: SkipNode<&'max ()>) -> SkipNode<&'min ()> {
-            v
-        }
-
-        #[allow(dead_code)]
-        fn shorten_lifetime_into_iter<'min, 'max: 'min>(
-            v: IntoIter<&'max ()>,
-        ) -> IntoIter<&'min ()> {
-            v
-        }
-
-        // IterMut is covariant on the value type.
-        // This is consistent with Rust reference &'a T.
-        #[allow(dead_code)]
-        fn shorten_lifetime_iter<'min, 'max: 'min>(
-            v: Iter<'max, &'max ()>,
-        ) -> Iter<'min, &'min ()> {
-            v
-        }
-
-        // IterMut is not covariant on the value type.
-        // This is consistent with Rust mutable reference type &mut T.
-        // TODO: write a test that can't compile
-        #[allow(dead_code)]
-        fn shorten_lifetime_iter_mut<'min, 'max: 'min>(v: Iter<'max, ()>) -> Iter<'min, ()> {
-            v
-        }
-    }
-
-    #[test]
-    fn test_level_required() {
-        assert_eq!(levels_required(0), 1);
-        assert_eq!(levels_required(1), 1);
-        assert_eq!(levels_required(2), 2);
-        assert_eq!(levels_required(3), 2);
-        assert_eq!(levels_required(1023), 10);
-        assert_eq!(levels_required(1024), 11);
-    }
-
-    fn level_for_index(mut n: usize) -> usize {
-        let mut cnt = 0;
-        while n & 0x1 == 1 {
-            cnt += 1;
-            n /= 2;
-        }
-        cnt
-    }
-
-    #[test]
-    fn test_level_index() {
-        assert_eq!(level_for_index(0), 0);
-        assert_eq!(level_for_index(1), 1);
-        assert_eq!(level_for_index(2), 0);
-        assert_eq!(level_for_index(3), 2);
-        assert_eq!(level_for_index(4), 0);
-        assert_eq!(level_for_index(5), 1);
-        assert_eq!(level_for_index(6), 0);
-        assert_eq!(level_for_index(7), 3);
-        assert_eq!(level_for_index(8), 0);
-        assert_eq!(level_for_index(9), 1);
-        assert_eq!(level_for_index(10), 0);
-        assert_eq!(level_for_index(11), 2);
-    }
-
-    /// Make a list of size n
-    /// levels are evenly spread out
-    fn new_list_for_test(n: usize) -> Box<SkipNode<usize>> {
-        let max_level = levels_required(n);
-        let mut head = Box::new(SkipNode::<usize>::head(max_level));
-        assert_eq!(head.links.len(), max_level);
-        let mut nodes: Vec<_> = (0..n)
-            .map(|n| {
-                let new_node = Box::new(SkipNode::new(n, level_for_index(n)));
-                Box::into_raw(new_node)
-            })
-            .collect();
-        unsafe {
-            let node_max_level = nodes.iter().map(|&node| (*node).level).max();
-            if let Some(node_max_level) = node_max_level {
-                assert_eq!(node_max_level + 1, max_level);
-            }
-            for level in 0..max_level {
-                let mut last_node = head.as_mut() as *mut SkipNode<usize>;
-                let mut len_left = n;
-                for &mut node_ptr in nodes
-                    .iter_mut()
-                    .filter(|&&mut node_ptr| level <= (*node_ptr).level)
-                {
-                    if level == 0 {
-                        (*node_ptr).prev = NonNull::new(last_node);
-                    }
-                    (*last_node).links[level] = NonNull::new(node_ptr);
-                    (*last_node).links_len[level] = 1 << level;
-                    last_node = node_ptr;
-                    len_left -= 1 << level;
-                }
-                (*last_node).links_len[level] = len_left;
-            }
-        }
-        head
-    }
-
-    /////////////////////////////////////////////////////////
-    // Those tests are supposed to be run using Miri to detect UB.
-    // The size of those test are limited since Miri doesn't run very fast.
-    /////////////////////////////////////////////////////////
-
-    #[test]
-    fn miri_test_insert() {
-        let mut list = new_list_for_test(50);
-        list.insert_at(Box::new(SkipNode::new(100, 0)), 25).unwrap();
-        list.insert_at(Box::new(SkipNode::new(101, 1)), 25).unwrap();
-        list.insert_at(Box::new(SkipNode::new(102, 2)), 25).unwrap();
-        list.insert_at(Box::new(SkipNode::new(103, 3)), 25).unwrap();
-        list.insert_at(Box::new(SkipNode::new(104, 4)), 25).unwrap();
-    }
-
-    #[test]
-    fn miri_test_remove() {
-        let mut list = new_list_for_test(50);
-        for i in (0..50).rev() {
-            list.remove_at(i).unwrap();
-        }
-    }
-
-    #[test]
-    fn miri_test_distance() {
-        let list = new_list_for_test(50);
-        for i in 0..=list.level {
-            let _ = list.distance_at_level(i, None);
-        }
-    }
-
-    #[test]
-    fn miri_test_iter() {
-        fn test_iter(size: usize) {
-            let list = new_list_for_test(size);
-            let first = list.next_ref();
-            let last = Some(list.last());
-            let mut iter = Iter { first, last, size };
-            for _ in 0..(size + 1) / 2 {
-                let _ = iter.next();
-                let _ = iter.next_back();
-            }
-            assert!(iter.next().is_none());
-        }
-        test_iter(9);
-        test_iter(10);
-    }
-
-    #[test]
-    fn miri_test_iter_mut() {
-        fn test_iter_mut(size: usize) {
-            let mut list = new_list_for_test(size);
-            let mut first = list.next_mut();
-            let last = first.as_mut().unwrap().last_mut();
-            let last = NonNull::new(last);
-            let mut iter = IterMut { first, last, size };
-            for _ in 0..(size + 1) / 2 {
-                let _ = iter.next();
-                let _ = iter.next_back();
-            }
-            assert!(iter.next().is_none());
-        }
-        test_iter_mut(9);
-        test_iter_mut(10);
-    }
-
-    #[test]
-    fn miri_test_into_iter() {
-        fn test_into_iter(size: usize) {
-            let mut list = new_list_for_test(size);
-            let mut first = unsafe { Some(list.take_tail().unwrap()) };
-            let last = first.as_mut().unwrap().last_mut();
-            let last = NonNull::new(last);
-            let mut iter = IntoIter { first, last, size };
-            for _ in 0..(size + 1) / 2 {
-                let _ = iter.next();
-                let _ = iter.next_back();
-            }
-            assert!(iter.next().is_none());
-        }
-
-        test_into_iter(9);
-        test_into_iter(10);
-    }
-
-    #[test]
-    fn miri_test_retain() {
-        let mut list = new_list_for_test(50);
-        let _ = list.retain(|_, val| val % 2 == 0);
-    }
-
-    #[test]
-    fn miri_test_check() {
-        let list = new_list_for_test(100);
-        list.check();
     }
 }
